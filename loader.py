@@ -1,82 +1,93 @@
 import pandas as pd
 import time
 import os
+import tkinter as tk
+from tkinter import filedialog
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-# --- PART A: The Worker Function ---
-# (In the real project, the Text Analysis Developer gives you this function.
-# For now, we simulate it.)
-def analyze_chunk(chunk_df, chunk_id):
-    """
-    This function runs on a separate CPU core.
-    It takes a piece of the data, processes it, and returns the result.
-    """
-    pid = os.getpid() # Get the ID of the process running this
-    print(f"  -> Worker (Core {pid}) started Chunk {chunk_id}...")
-    
-    # Simulate heavy text analysis work (sleep for 1 second)
-    time.sleep(1) 
-    
-    # Example logic: Count word length (Pandas operation)
-    chunk_df['word_count'] = chunk_df['text_content'].apply(lambda x: len(str(x).split()))
-    chunk_df['processed_by_core'] = pid
-    
-    return chunk_df
+# --- MODULE: RULE CHECKER AND SCORER (Worker) ---
+def analyze_chunk(chunk_df, column_name):
+    pid = os.getpid()
+    try:
+        chunk_df = chunk_df.copy()
+        
+        # 1. FIRST FILTER: Pattern finding (removing very short text)
+        chunk_df = chunk_df[chunk_df[column_name].str.len() > 3]
+        
+        # 2. RULE-BASED SCORING: Simple Sentiment/Feeling Rules
+        def get_score(text):
+            text = str(text).lower()
+            pos = ['good', 'great', 'excellent', 'happy', 'success', 'provisional']
+            neg = ['bad', 'poor', 'fail', 'error', 'slow', 'size']
+            score = sum(1 for w in pos if w in text) - sum(1 for w in neg if w in text)
+            return score
 
-# --- PART B: The Parallel Orchestrator (YOUR ROLE) ---
+        chunk_df['feeling_score'] = chunk_df[column_name].apply(get_score)
+        chunk_df['processed_by_core'] = pid
+        return chunk_df
+    except Exception as e:
+        return str(e)
+
+# --- MODULE: SEARCH CHECKER AND FILE SAVER (Orchestrator) ---
 def main():
-    file_path = "large_sample_data.csv"
-    
-    # 1. SETUP: Check CPU Cores
-    # We leave 1 core free for the OS/Main process so the computer doesn't freeze
-    max_workers = os.cpu_count() - 1 
-    if max_workers < 1: max_workers = 1
-    
-    print(f"--- Starting Parallel Processor on {max_workers} Cores ---")
+    # 1. Load Data
+    root = tk.Tk(); root.withdraw()
+    print(">>> Select CSV for Batch Check...")
+    file_path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
+    if not file_path: return
 
-    # 2. PANDAS: Load and Split (The "Text Breaker")
-    print("Loading data...")
-    # Read the CSV
-    df = pd.read_csv(file_path)
-    total_rows = len(df)
-    
-    # Calculate chunk size (Total rows / Number of CPUs)
-    chunk_size = total_rows // max_workers
-    
-    # Split the big DataFrame into a list of smaller DataFrames
-    chunks = [df.iloc[i:i + chunk_size] for i in range(0, total_rows, chunk_size)]
-    print(f"Data split into {len(chunks)} chunks of approx {chunk_size} rows each.")
+    try:
+        df = pd.read_csv(file_path)
+        text_cols = df.select_dtypes(include=['object']).columns.tolist()
+        target_col = 'text_content' if 'text_content' in df.columns else \
+                     df[text_cols].astype(str).apply(lambda s: s.str.len().mean()).idxmax()
+    except Exception as e:
+        print(f"Error: {e}"); return
 
-    # 3. CONCURRENT.FUTURES: The Execution Engine
+    # 2. Parallel Loading & Scoring
+    max_workers = os.cpu_count() - 1 or 1
+    chunk_size = len(df) // max_workers if len(df) > max_workers else 1
+    chunks = [df.iloc[i:i + chunk_size] for i in range(0, len(df), chunk_size)]
+
+    print(f"--- Processing Batch: {len(df)} rows on {max_workers} Cores ---")
     results = []
     start_time = time.time()
-
-    # Create the Process Pool
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # Submit tasks to the pool
-        # This maps the 'analyze_chunk' function to our data 'chunks'
-        future_to_chunk = {executor.submit(analyze_chunk, chunk, i): i for i, chunk in enumerate(chunks)}
-        
-        print("Tasks submitted. Waiting for results...")
-        
-        # 4. QUEUE LOGIC: Collecting Results
-        # 'as_completed' acts like a Queue. As soon as a worker finishes, 
-        # it yields the result here.
-        for future in as_completed(future_to_chunk):
-            try:
-                data = future.result()
-                results.append(data)
-                print(f"  <- A Chunk finished processing. ({len(results)}/{len(chunks)} done)")
-            except Exception as exc:
-                print(f"Generated an exception: {exc}")
-
-    # 5. AGGREGATION: Combine results back together
-    final_df = pd.concat(results)
-    end_time = time.time()
     
-    print("-" * 30)
-    print(f"DONE! Processed {len(final_df)} rows in {end_time - start_time:.2f} seconds.")
-    print(final_df[['id', 'word_count', 'processed_by_core']].head())
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(analyze_chunk, chunk, target_col) for chunk in chunks]
+        for f in as_completed(futures):
+            res = f.result()
+            if isinstance(res, pd.DataFrame): results.append(res)
+
+    # 3. Aggregation & Search Checker
+    if results:
+        final_df = pd.concat(results)
+        
+        # Search Feature: Automatically filter for a keyword (e.g., 'Industry' or 'Total')
+        # This simulates the "Search Checker" module
+        keyword = "total" 
+        search_results = final_df[final_df[target_col].str.contains(keyword, case=False, na=False)]
+        
+        # 4. Email Summary Generation (Simulation)
+        avg_score = final_df['feeling_score'].mean()
+        summary_report = f"""
+        --- TEXT ANALYSIS SUMMARY REPORT ---
+        Total Rows Processed: {len(final_df)}
+        Search Term Used: '{keyword}'
+        Search Matches Found: {len(search_results)}
+        Average Feeling Score: {avg_score:.2f}
+        Processing Time: {time.time() - start_time:.2f}s
+        Status: Ready for Language Expert Review.
+        """
+        print(summary_report)
+
+        # 5. File Saver
+        output_name = "group_batch_report.csv"
+        final_df.to_csv(output_name, index=False)
+        print(f">>> Full report saved: {output_name}")
+        
+    else:
+        print("Backend Error: No results generated.")
 
 if __name__ == '__main__':
     main()
