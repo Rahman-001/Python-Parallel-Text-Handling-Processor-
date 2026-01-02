@@ -1,55 +1,71 @@
 import pandas as pd
 import time
 import os
+import sqlite3
 import tkinter as tk
 from tkinter import filedialog
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-# --- MODULE: RULE CHECKER AND SCORER (Worker) ---
+# --- TEAM CONNECTION: IMPORT PARTNER'S WORK ---
+try:
+    from logic import CoreLogic
+    logic_tool = CoreLogic()
+except ImportError:
+    print("CRITICAL ERROR: logic.py not found in the same folder!")
+    logic_tool = None
+
+# --- MODULE: PARALLEL WORKER ---
 def analyze_chunk(chunk_df, column_name):
     pid = os.getpid()
     try:
         chunk_df = chunk_df.copy()
         
-        # 1. FIRST FILTER: Pattern finding (removing very short text)
-        chunk_df = chunk_df[chunk_df[column_name].str.len() > 3]
-        
-        # 2. RULE-BASED SCORING: Simple Sentiment/Feeling Rules
-        def get_score(text):
-            text = str(text).lower()
-            pos = ['good', 'great', 'excellent', 'happy', 'success', 'provisional']
-            neg = ['bad', 'poor', 'fail', 'error', 'slow', 'size']
-            score = sum(1 for w in pos if w in text) - sum(1 for w in neg if w in text)
-            return score
-
-        chunk_df['feeling_score'] = chunk_df[column_name].apply(get_score)
+        # We ensure the column is treated as a string before passing to Core Logic
+        if logic_tool:
+            chunk_df['feeling_score'] = chunk_df[column_name].astype(str).apply(logic_tool.advanced_scorer)
+        else:
+            chunk_df['feeling_score'] = 0
+            
         chunk_df['processed_by_core'] = pid
         return chunk_df
     except Exception as e:
         return str(e)
 
-# --- MODULE: SEARCH CHECKER AND FILE SAVER (Orchestrator) ---
+# --- MODULE: UNIVERSAL ORCHESTRATOR ---
 def main():
-    # 1. Load Data
+    # 1. UI: File Selection
     root = tk.Tk(); root.withdraw()
-    print(">>> Select CSV for Batch Check...")
+    print(">>> Select any CSV file for processing...")
     file_path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
     if not file_path: return
 
+    # 2. AGGRESSIVE LOADING & AUTO-DETECTION
     try:
-        df = pd.read_csv(file_path)
-        text_cols = df.select_dtypes(include=['object']).columns.tolist()
-        target_col = 'text_content' if 'text_content' in df.columns else \
-                     df[text_cols].astype(str).apply(lambda s: s.str.len().mean()).idxmax()
-    except Exception as e:
-        print(f"Error: {e}"); return
+        # We try common delimiters in case it's not a standard comma
+        df = pd.read_csv(file_path, sep=None, engine='python')
+        
+        if df.empty:
+            print("Error: The file is empty."); return
 
-    # 2. Parallel Loading & Scoring
+        # AGGRESSIVE DETECTION: 
+        # Instead of filtering by type, we look at all columns.
+        # We pick the column that has the longest average content.
+        potential_cols = df.columns.tolist()
+        target_col = df[potential_cols].astype(str).apply(lambda s: s.str.len().mean()).idxmax()
+        
+        print(f">>> [System] Auto-Detected Analysis Column: '{target_col}'")
+        
+    except Exception as e:
+        print(f"Loading Error: {e}"); return
+
+    # 3. PARALLEL ENGINE (7+ Cores)
     max_workers = os.cpu_count() - 1 or 1
-    chunk_size = len(df) // max_workers if len(df) > max_workers else 1
+    chunk_size = max(1, len(df) // max_workers)
     chunks = [df.iloc[i:i + chunk_size] for i in range(0, len(df), chunk_size)]
 
-    print(f"--- Processing Batch: {len(df)} rows on {max_workers} Cores ---")
+    
+
+    print(f"--- Running Parallel Engine on {max_workers} Cores ---")
     results = []
     start_time = time.time()
     
@@ -59,35 +75,31 @@ def main():
             res = f.result()
             if isinstance(res, pd.DataFrame): results.append(res)
 
-    # 3. Aggregation & Search Checker
+    # 4. DATA INTEGRITY & STORAGE
     if results:
         final_df = pd.concat(results)
         
-        # Search Feature: Automatically filter for a keyword (e.g., 'Industry' or 'Total')
-        # This simulates the "Search Checker" module
-        keyword = "total" 
-        search_results = final_df[final_df[target_col].str.contains(keyword, case=False, na=False)]
+        # Sync to Database
+        db_ready_df = pd.DataFrame()
+        db_ready_df['content'] = final_df[target_col].astype(str)
+        db_ready_df['score'] = final_df['feeling_score']
+        db_ready_df['category'] = "Auto-Processed"
         
-        # 4. Email Summary Generation (Simulation)
-        avg_score = final_df['feeling_score'].mean()
-        summary_report = f"""
-        --- TEXT ANALYSIS SUMMARY REPORT ---
-        Total Rows Processed: {len(final_df)}
-        Search Term Used: '{keyword}'
-        Search Matches Found: {len(search_results)}
-        Average Feeling Score: {avg_score:.2f}
-        Processing Time: {time.time() - start_time:.2f}s
-        Status: Ready for Language Expert Review.
-        """
-        print(summary_report)
-
-        # 5. File Saver
-        output_name = "group_batch_report.csv"
-        final_df.to_csv(output_name, index=False)
-        print(f">>> Full report saved: {output_name}")
+        if logic_tool:
+            print(">>> Syncing results to Database...")
+            conn = sqlite3.connect(logic_tool.db_name)
+            db_ready_df.to_sql('text_data', conn, if_exists='append', index=False)
+            conn.close()
         
+        # 5. FINAL REPORT
+        print(f"\n--- BATCH REPORT COMPLETE ---")
+        print(f"Total Processed: {len(final_df)} rows")
+        print(f"Processing Time: {time.time() - start_time:.2f}s")
+        
+        final_df.to_csv("universal_batch_report.csv", index=False)
+        print("CSV Report: 'universal_batch_report.csv' created.")
     else:
-        print("Backend Error: No results generated.")
+        print("Engine Error: No results generated.")
 
 if __name__ == '__main__':
     main()
